@@ -10,7 +10,7 @@
     "lint": "eslint",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate deploy",
-    "worker": "tsx worker/dm-worker.ts",
+    "worker": "tsx --env-file=${ENV_FILE:-.env} worker/dm-worker.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
@@ -38,6 +38,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "babel-plugin-react-compiler": "1.0.0",
+    "dotenv": "^18.0.4",
     "eslint": "^9",
     "eslint-config-next": "^16.2.6",
     "prisma": "^7.8.0",
