@@ -1026,7 +1026,7 @@ async function sendFollowRecheckAck({
   instagramAccountId: string;
   automationId: string;
   userId: string;
-  operationId: string | null;
+  operationId: string;
 }): Promise<void> {
   const message = process.env.FOLLOW_RECHECK_ACK_MESSAGE?.trim();
   if (!message) return;
@@ -1041,16 +1041,13 @@ async function sendFollowRecheckAck({
       "NX"
     );
     if (first !== "OK") return;
-    const send = () =>
-      sendDirectMessage({ context, instagramAccountId, userId, message });
-    // Its own id: the tap's id is claimed later by the link or prompt that
-    // the re-check sends, and claiming it here would suppress that message.
-    // Without an id the Redis NX above is the only dedupe.
-    if (operationId) {
-      await sendPostbackOnce({ operationId: `${operationId}:ack`, send });
-    } else {
-      await send();
-    }
+    await sendPostbackOnce({
+      // Its own id: the tap's id is claimed later by the link or prompt that
+      // the re-check sends, and claiming it here would suppress that message.
+      operationId: `${operationId}:ack`,
+      send: () =>
+        sendDirectMessage({ context, instagramAccountId, userId, message }),
+    });
   } catch (error) {
     console.log(
       "[DM Worker] Failed to send follow re-check acknowledgement:",
