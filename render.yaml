@@ -1,0 +1,168 @@
+# OpenReply — Render.com blueprint
+#
+# Provisions the full stack: web app, DM worker, Postgres, and a Redis-compatible
+# Key Value instance. See AGENT-DEPLOY-GUIDE.md Phase 2 for the operational context.
+#
+# Design decisions (why this file looks the way it does):
+#
+# - Native Node runtime, not the Dockerfile. Blueprint fields (preDeployCommand,
+#   startCommand, env wiring) all apply to native services; Docker would force
+#   overrides through dockerCommand and dashboard-only port settings.
+#
+# - PORT=3000 for the web service. `next start` binds 3000 and does NOT read
+#   $PORT (verified in node_modules/next). Render defaults to expecting 10000,
+#   so we point Render at 3000 instead of asking Next to move.
+#
+# - No healthCheckPath on the web service (default TCP check instead).
+#   /api/health returns 503 whenever the DM worker's heartbeat is older than
+#   120s (app/api/health/route.ts). Using it as Render's health path would make
+#   Render restart the *web* service every time the worker redeploys or crashes.
+#   Keep /api/health for external monitoring, not for Render's restart loop.
+#
+# - Migrations run in preDeployCommand (after build, before start, with DB
+#   access). Never in buildCommand: build has no route to the database (P1001).
+#
+# - No cron service. worker/dm-worker.ts runs refresh-tokens (12h),
+#   snapshot-followers (24h) and attach-next-reel (5min) in-process. Do NOT also
+#   run scripts/cron.sh — that double-schedules the same Graph API calls.
+#
+# - Node version: Render's default for new services (24.x) satisfies Prisma 7 /
+#   Next 16. NODE_VERSION pins the major so future default bumps don't surprise
+#   the build. CI still runs on Node 20; the Dockerfile still uses node:20.
+#
+# - Known risk: builds run on Render's standard build pipeline (~512MB). If
+#   `next build` OOMs ("JavaScript heap out of memory"), either enable the
+#   Performance build pipeline (Workspace Settings, paid) or switch this service
+#   to runtime: docker, which builds on Render's Docker build infra instead.
+
+services:
+  # ── Redis-compatible queue backend (Render Key Value, runs Valkey 8) ───────
+  - type: keyvalue
+    name: openreply-redis
+    plan: 256mb
+    # BullMQ queues are stored here — LRU eviction would silently drop queued
+    # DMs. noeviction errors instead of losing data (then raise the plan).
+    maxmemoryPolicy: noeviction
+    persistenceMode: journal-snapshot
+    # Internal only: both services live in this workspace/region. If you ever
+    # run the worker off-Render again (hybrid setup), replace [] with
+    # - { source: 0.0.0.0/0, description: everywhere } to allow external URLs.
+    ipAllowList: []
+
+  # ── Web app: Next.js dashboard, OAuth callbacks, Meta webhook receiver ─────
+  - type: web
+    name: openreply-web
+    runtime: node
+    region: oregon
+    plan: 0.5c-512mb
+    # Deploy only when CI (typecheck/lint/tests/build) is green.
+    autoDeployTrigger: checksPass
+    # prisma generate needs devDependencies; --include=dev guards against
+    # NODE_ENV=production being set at build time (npm would omit them and
+    # `prisma generate` would not exist).
+    buildCommand: npm ci --include=dev && npm run build
+    preDeployCommand: npx prisma migrate deploy
+    startCommand: npm start
+    envVars:
+      # Tell Render where Next actually binds (see header).
+      - key: PORT
+        value: "3000"
+      - key: NODE_VERSION
+        value: "24"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: openreply-db
+          property: connectionString # private-network URL
+      - key: REDIS_URL
+        fromService:
+          name: openreply-redis
+          type: keyvalue
+          property: connectionString # private-network URL
+      # NEXTAUTH_URL, secrets and provider credentials come from the shared
+      # group below, so web and worker are guaranteed identical values.
+      - fromGroup: openreply-app-env
+
+  # ── Background worker: BullMQ consumer + in-process schedulers ────────────
+  # Sends DMs, reconciles missed comments, refreshes Instagram tokens,
+  # snapshots followers. Runs raw TypeScript via tsx (needs devDependencies).
+  - type: worker
+    name: openreply-worker
+    runtime: node
+    region: oregon
+    plan: 0.5c-512mb
+    autoDeployTrigger: checksPass
+    # No .next needed — only the generated Prisma client.
+    buildCommand: npm ci --include=dev && npm run db:generate
+    startCommand: npm run worker
+    envVars:
+      # package.json's worker script runs `tsx --env-file=${ENV_FILE:-.env}`.
+      # Locally that resolves to .env; on Render there is no .env file and
+      # tsx exits 9 ("not found") if the file is missing. ENV_FILE=/dev/null
+      # points it at an existing empty file, so env comes from Render instead.
+      # The npm script itself is unchanged — the Mac/PM2 worker is unaffected.
+      - key: ENV_FILE
+        value: /dev/null
+      - key: NODE_VERSION
+        value: "24"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: openreply-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: openreply-redis
+          type: keyvalue
+          property: connectionString
+      - fromGroup: openreply-app-env
+
+# ── Postgres ────────────────────────────────────────────────────────────────
+databases:
+  - name: openreply-db
+    databaseName: openreply
+    # Match local development (docker-compose.yml / brew are both Postgres 16).
+    # Render default is 18; in-place upgrade to 18 stays available later.
+    postgresMajorVersion: "16"
+    region: oregon
+    plan: 0.1c-256mb
+    # ipAllowList omitted on purpose: default allows external connections
+    # (credentials required), so you can pg_dump/psql from the Mac during
+    # cutover. Tighten to [] once migration is done, if you want.
+
+# ── Shared environment (entered once, applied to web AND worker) ────────────
+# sync: false = Render prompts for the value at blueprint setup and never
+# changes it on later git syncs. NEVER commit real values here — this repo is
+# public.
+envVarGroups:
+  - name: openreply-app-env
+    envVars:
+      # Set to https://openreply-web.onrender.com (confirm the exact URL on
+      # the service page after the first deploy — subdomains can differ).
+      - key: NEXTAUTH_URL
+        sync: false
+      - key: NEXTAUTH_SECRET
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      # MUST be byte-identical to the Mac's current value: existing Instagram
+      # tokens are encrypted with it. Rotating = every account reconnects.
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      # Full address on a Resend-verified domain, e.g. OpenReply <noreply@yourdomain.com>
+      - key: EMAIL_FROM
+        sync: false
+      # Fails OPEN without this: anyone reaching the URL can sign in and get a
+      # workspace. Comma-separated, case-insensitive.
+      - key: ALLOWED_EMAILS
+        sync: false
+      - key: INSTAGRAM_APP_ID
+        sync: false
+      - key: INSTAGRAM_APP_SECRET
+        sync: false
+      - key: FACEBOOK_APP_SECRET
+        sync: false
+      - key: WEBHOOK_VERIFY_TOKEN
+        sync: false
+      - key: META_GRAPH_API_VERSION
+        value: v25.0
