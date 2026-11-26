@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "OpenReply",
+    "description": "Read-only status of the OpenReply deployment: PM2 processes, health, the public tunnel, logs and database tables. Open it from the OpenReply entry in the sidebar."
+  }
+}

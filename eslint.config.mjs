@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // DeepSeek Harness plugin: plain ESM for the DSH host and browser, not part of the Next app.
+    "dsh-plugin/**",
   ]),
 ]);
 

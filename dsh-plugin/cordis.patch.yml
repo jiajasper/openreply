@@ -1,0 +1,5 @@
+# @local/dsh-openreply: a read-only view of the OpenReply deployment (PM2, health, logs, DB).
+# Row config (all optional): repo (the openreply checkout), pm2, psql, healthUrl.
+- insert:
+    - id: openreply
+      name: '@local/dsh-openreply'

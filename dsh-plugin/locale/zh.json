@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "OpenReply",
+    "description": "OpenReply 部署的只读状态：PM2 进程、健康检查、公网隧道、日志和数据库表。从侧边栏的 OpenReply 打开。"
+  }
+}
